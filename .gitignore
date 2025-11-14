@@ -51,11 +51,6 @@ coverage.xml
 .ipynb_checkpoints/
 *.ipynb_checkpoints/
 
-# MyPy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
 # Ruff
 .ruff_cache/
 
@@ -64,8 +59,8 @@ dmypy.json
 *.fit
 *.hdf5
 *.h5
-data/raw/
-data/processed/
+*.npz
+data
 !data/README.md
 
 # NIFTy cache

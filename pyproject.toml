@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astropfm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Unified Probabilistic Foundation Model for Astronomy across Wavelength and Scale"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ dependencies = [
     "nifty8>=8.0",
     "astropy>=5.0",
     "matplotlib>=3.5.0",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
@@ -49,7 +50,6 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
-    "mypy>=1.0",
     "pre-commit>=3.0",
     "jupyter>=1.0",
     "ipykernel>=6.0",
@@ -71,7 +71,7 @@ version_file = "src/astropfm/_version.py"
 fallback_version = "0.1.dev0"
 
 [tool.ruff]
-line-length = 88
+line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
@@ -106,5 +106,3 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
-
-
