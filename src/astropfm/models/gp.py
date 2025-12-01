@@ -1,4 +1,15 @@
+"""
+gp.py
+____________________________________________________________________________________________________
+
+Description: Gaussian Process models for AstroPFM.
+Author: Steven Dillmann
+Date: 2025-11-14
+"""
+
 # === Setup ========================================================================================
+
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -7,24 +18,24 @@ import nifty8.re as jft
 # === Main =========================================================================================
 
 
-class BaseGP(jft.Model):
+class SpatialGP(jft.Model):  # NOTE: other name may be 'GaussianRandomFields'
     """A collection of independent correlated field models for each channel"""
 
     def __init__(
         self,
-        n_channels,
-        shape,
-        distances,
-        offset_mean,
-        offset_std,
-        fluctuations,
-        loglogavgslope,
-        flexibility,
-        asperity=None,
-        name="cf",
-        prefix="",
+        n_channels: int,
+        shape: tuple[int, ...],  # NOTE: Tuple[float, float] should be used for 2D images
+        distances: tuple[float, ...],
+        offset_mean: float,  # NOTE: single float for now, does this need a tuple?
+        offset_std: tuple[float, float],
+        fluctuations: tuple[float, float],
+        loglogavgslope: tuple[float, float],
+        flexibility: tuple[float, float],
+        asperity: tuple[float, float] | None = None,
+        name: str = "spatial_gp",
+        prefix: str = "",
     ):
-        correlated_fields = get_correlated_field(
+        correlated_fields = self._build_correlated_field(
             shape,
             distances,
             offset_mean,
@@ -42,41 +53,135 @@ class BaseGP(jft.Model):
         }
         self._correlated_fields = correlated_fields
         self._n_channels = n_channels
+        self._shape = shape
+        self._distances = distances
         super().__init__(domain=domain, white_init=True)
 
     @property
-    def n_channels(self):
+    def n_channels(self) -> int:
+        """Number of channels in the model."""
         return self._n_channels
 
-    def __call__(self, x):
-        return jax.vmap(self.correlated_fields)(x)
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape of the model."""
+        return self._shape
+
+    @property
+    def distances(self) -> tuple[float, ...]:
+        """Distances between channels in the model."""
+        return self._distances
+
+    def __call__(self, x: dict[str, Any]) -> jnp.ndarray:
+        return jax.vmap(self._correlated_fields)(x)
+
+    def sample(self, key: int | jax.Array) -> jnp.ndarray:
+        """Generate a random sample from the prior."""
+        if isinstance(key, int):
+            key = jax.random.PRNGKey(key)  # NOTE: for production, provide the jax.random.PRNGKey directly
+
+        params = self.init(key)
+        sample = jnp.array(self(params))
+        return sample
+
+    @staticmethod
+    def _build_correlated_field(
+        shape,
+        distances,
+        offset_mean,
+        offset_std,
+        fluctuations,
+        loglogavgslope,
+        flexibility,
+        asperity,
+        name="spatial",
+        prefix="",
+    ):
+        """Create an instance of a correlated field model"""
+        cf_zero_mode = dict(offset_mean=offset_mean, offset_std=offset_std)
+        cf_fluctuations = dict(
+            fluctuations=fluctuations,
+            loglogavgslope=loglogavgslope,
+            flexibility=flexibility,
+            asperity=asperity,
+        )
+        cfm = jft.CorrelatedFieldMaker(name)
+        cfm.set_amplitude_total_offset(**cf_zero_mode)
+        cfm.add_fluctuations(
+            shape, distances=distances, **cf_fluctuations, prefix=prefix, non_parametric_kind="amplitude"
+        )
+        correlated_field = cfm.finalize()
+        return correlated_field
 
 
 class MixtureGP(jft.Model):
     """A mixture of Gaussian processes with a global mixing matrix"""
 
+    # NOTE: technically latent fields not SpatialGP (maybe call it LatentGP?), from "Linear Mixing Model" ($s = A u$).
+    # NOTE: Observed Signal ($s$): What you actually see in the sky (the mixed channels).
+    # NOTE: Latent Signal ($u$): The hidden, underlying structure that generates the observations.
+
     def __init__(
         self,
-        base_models,
-        mix_mode="cholesky",
-        mix_diag=(0.0, 1.0),
-        mix_off_diag=(0.0, 1.0),
-        mix_full=(0.0, 1.0),
-        mix_offset=(0.0, 1.0),
+        spatial_gps: SpatialGP,
+        mix_mode: str = "full",
+        mix_diag: tuple[float, float] = (0.0, 1.0),
+        mix_off_diag: tuple[float, float] = (0.0, 1.0),
+        mix_full: tuple[float, float] = (0.0, 1.0),
+        mix_offset: tuple[float, float] = (0.0, 1.0),
     ):
-        self.base_models = base_models
+        self.spatial_gps = spatial_gps
         self.mix_mode = mix_mode
-        domain = self.base_models.domain
-        init = self.base_models.init
-        n_channels = self.base_models.n_channels
+        domain = self.spatial_gps.domain
+        init = self.spatial_gps.init
+        n_channels = self.spatial_gps.n_channels
 
         if self.mix_mode == "full":
             domain, init = self._build_full_mixing_matrix(n_channels, domain, init, mix_full)
         elif self.mix_mode == "diag":
             domain, init = self._build_diag_mixing_matrix(n_channels, domain, init, mix_diag, mix_off_diag)
+        else:
+            raise ValueError(f"Unknown mix_mode: {mix_mode}")
 
         domain, init = self._build_mixing_offset(n_channels, domain, init, mix_offset)
         super().__init__(domain=domain, init=init)
+
+    @property
+    def n_channels(self) -> int:
+        """Number of channels in the model."""
+        return self.spatial_gps.n_channels
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape of the model."""
+        return self.spatial_gps.shape
+
+    @property
+    def distances(self) -> tuple[float, ...]:
+        """Distances between channels in the model."""
+        return self.spatial_gps.distances
+
+    def __call__(self, x: dict[str, Any]) -> jnp.ndarray:
+        base_outputs = self.spatial_gps({k: x[k] for k in self.spatial_gps.domain.keys()})
+
+        if self.mix_mode == "full":
+            mixing_matrix = self.mixing_matrix(x)
+        elif self.mix_mode == "diag":
+            diag = self.mixing_diag(x)
+            off_diag = self.mixing_off_diag(x)
+            mixing_matrix = _assemble_cholesky_matrix(diag, off_diag)
+
+        mixture_output = jnp.tensordot(mixing_matrix, base_outputs, axes=(1, 0))
+        return jnp.exp(mixture_output + self.mixing_offset(x)[:, None, None])
+
+    def sample(self, key: int | jax.Array) -> jnp.ndarray:
+        """Generate a random sample from the prior."""
+        if isinstance(key, int):
+            key = jax.random.PRNGKey(key)
+
+        params = self.init(key)
+        sample = jnp.array(self(params))
+        return sample
 
     def _build_full_mixing_matrix(self, n_channels, domain, init, mix_full):
         self.mixing_matrix = jft.NormalPrior(
@@ -97,7 +202,7 @@ class MixtureGP(jft.Model):
         self.mixing_off_diag = jft.NormalPrior(
             mix_off_diag[0],
             mix_off_diag[1],
-            shape=(n_triangular_lower(n_channels),),
+            shape=(_n_triangular_lower(n_channels),),
             name="mixing_off_diag",
         )
         return (
@@ -114,56 +219,11 @@ class MixtureGP(jft.Model):
         )
         return domain | self.mixing_offset.domain, init | self.mixing_offset.init
 
-    def __call__(self, state):
-        base_outputs = self.base_models({k: state[k] for k in self.base_models.domain.keys()})
-
-        if self.mix_mode == "full":
-            mixing_matrix = self.mixing_matrix(state)
-        elif self.mix_mode == "diag":
-            diag = self.mixing_diag(state)
-            off_diag = self.mixing_off_diag(state)
-            mixing_matrix = assemble_cholesky_matrix(diag, off_diag)
-
-        mixture_output = jnp.tensordot(mixing_matrix, base_outputs, axes=(1, 0))
-        return jnp.exp(mixture_output + self.mixing_offset(state)[:, None, None])
-
 
 # === Utilities ====================================================================================
 
 
-def get_correlated_field(
-    shape,
-    distances,
-    offset_mean,
-    offset_std,
-    fluctuations,
-    loglogavgslope,
-    flexibility,
-    asperity,
-    name="cf",
-    prefix="",
-):
-    """Create an instance of a correlated field model"""
-    cf_zm = dict(offset_mean=offset_mean, offset_std=offset_std)
-    cf_fl = dict(
-        fluctuations=fluctuations,
-        loglogavgslope=loglogavgslope,
-        flexibility=flexibility,
-        asperity=asperity,
-    )
-    cfm = jft.CorrelatedFieldMaker(name)
-    cfm.set_amplitude_total_offset(**cf_zm)
-    cfm.add_fluctuations(shape, distances=distances, **cf_fl, prefix=prefix, non_parametric_kind="amplitude")
-    correlated_field = cfm.finalize()
-    return correlated_field
-
-
-def n_triangular_lower(n):
-    """Number of elements in the lower triangular part of a square matrix"""
-    return (n * (n - 1)) // 2
-
-
-def assemble_cholesky_matrix(diag, off_diag):
+def _assemble_cholesky_matrix(diag, off_diag):
     """Assemble a Cholesky matrix from a diagonal and off-diagonal vector"""
     n_channels = len(diag)
     L = jnp.zeros((n_channels, n_channels))
@@ -172,3 +232,8 @@ def assemble_cholesky_matrix(diag, off_diag):
     L = L.at[tril_indices].set(off_diag)
     L = L * (jnp.exp(diag))[:, None]
     return L
+
+
+def _n_triangular_lower(n):
+    """Number of elements in the lower triangular part of a square matrix"""
+    return (n * (n - 1)) // 2
