@@ -1,5 +1,3 @@
-"""AstroPFM data module."""
+from astropfm.data.dataset import MultiInstrumentDataset, SingleInstrumentDataset, load_dataset, load_multiple_datasets
 
-from astropfm.data.dataset import Dataset, load_dataset
-
-__all__ = ["Dataset", "load_dataset"]
+__all__ = ["SingleInstrumentDataset", "MultiInstrumentDataset", "load_dataset", "load_multiple_datasets"]
